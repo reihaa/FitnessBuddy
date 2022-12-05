@@ -1,81 +1,25 @@
-import customtkinter
+import threading
 import socket
 from ast import literal_eval
 import numpy as np
-from scipy.spatial.transform import Rotation as R
-from scipy import integrate
-
 import imufusion
-import matplotlib.pyplot as plt
+import tkinter as tk
 
-customtkinter.set_appearance_mode("System")  # Modes: system (default), light, dark
-customtkinter.set_default_color_theme("blue")  # Themes: blue (default), dark-blue, green
-
-app = customtkinter.CTk()  # create CTk window like you do with the Tk window
-app.geometry("400x240")
 
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 acc_bias = np.array([0.01732761, 0.04202371, 10.56737618])
 
-# def calibrate():
-#     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-#     client.connect(("192.168.4.1", 80))
-#     global madgwick
-#     acc_arr = []
-#     gyro_arr = []
-#     time_arr = []
-#     res = ""
-#     ahrs_im = imufusion.Ahrs()
-#
-#     try:
-#         for _ in range(100):
-#             read = client.recv(1024)
-#             if read == b'':
-#                 break
-#             res = res + str(read)[2:-1]
-#             while res.find("))") != -1:
-#                 index = res.find("))") + 2
-#                 timestamp, acc, gyr = literal_eval(res[0: index])
-#                 res = res[index:]
-#                 acc = np.array(acc) * 10
-#
-#                 ahrs_im.update_no_magnetometer(np.array(gyr), np.array(acc), 1/100)
-#                 quater = ahrs_im.quaternion.to_matrix()
-#                 new_acc = np.matmul(quater, acc)
-#
-#                 time_arr.append(timestamp / 1000)
-#                 acc_arr.append(np.array(new_acc))
-#                 gyro_arr.append(np.array(gyr))
-#
-#         global acc_bias
-#         acc_bias = np.average(acc_arr, axis=0)
-#         print("bias", acc_bias)
-#     except RuntimeError as e:
-#         print("some error happened", e)
-#     finally:
-#         client.close()
-#         print("Calibration Done")
+ahrs = imufusion.Ahrs()
+is_started = False
+calibration = False
 
 
-def connect():
-    global client
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect(("192.168.4.1", 80))
-
-    speed = np.zeros(3)
-    height = 0
+def start():
+    global is_started, canvas, circle
     time = None
     res = ""
-    sample_rate = 1000
-    offset = imufusion.Offset(sample_rate)
-    ahrs = imufusion.Ahrs()
-    ahrs.settings = imufusion.Settings(0.5,  # gain
-                       10,  # acceleration rejection
-                       0,  # magnetic rejection
-                       5 * sample_rate)
-    moving_up = 1
     try:
-        for _ in range(sample_rate):
+        while is_started:
             read = client.recv(1024)
             if read == b'':
                 break
@@ -87,7 +31,6 @@ def connect():
                 gyr = np.array(gyr)
                 res = res[index:]
                 timestamp = timestamp / 1000
-                gyr = offset.update(gyr)
 
                 if time is None:  # Initial values, can not calculate speed and location from them
                     time = timestamp
@@ -97,21 +40,17 @@ def connect():
                 time = timestamp
 
                 ahrs.update_no_magnetometer(gyr, acc, delta_time)
-                new_acce = ahrs.earth_acceleration
+                euler = ahrs.quaternion.to_euler()
 
-                is_moving = np.linalg.norm(new_acce) > 0.5 # one meter / s2
-
-                if not is_moving:
-                    continue
-
-                if (moving_up == 1 and new_acce[2] > 0) or (moving_up == 0 and new_acce[2] < 0):
-                    speed = np.zeros(3)
-                    moving_up = 1 - moving_up
-
-                height += speed[2] + delta_time * speed[2]
-                speed = speed + delta_time * new_acce
-
-                print(height)
+                if calibration:
+                    if -180 <= euler[0] <= -170 or -180 <= euler[0] <= -170:
+                        print('Calibrated')
+                        is_started = False
+                else:
+                    location = -1 * np.sin(euler[0] * np.pi / 180.)
+                    x = 20
+                    y = (image_height - 45) - (20 + location * (image_height - 100))
+                    canvas.coords(circle, x, y, x + size, y+size)
 
     except RuntimeError as e:
         print("some error happened", e)
@@ -119,17 +58,65 @@ def connect():
         client.close()
 
 
+def calibrate():
+    global client, is_started, calibration
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(("192.168.4.1", 80))
+    is_started = True
+    calibration = True
+    tread = threading.Thread(target=start)
+    tread.start()
+
+
+def connect():
+    global client, is_started, calibration
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(("192.168.4.1", 80))
+    is_started = True
+    calibration = False
+    tread = threading.Thread(target=start)
+    tread.start()
+
+
 def disconnect():
-    client.close()
+    global is_started
+    is_started = False
 
 
-# Use CTkButton instead of tkinter Button
-# calibrate_button = customtkinter.CTkButton(master=app, text="Calibrate", command=calibrate)
-# calibrate_button.place(relx=0.5, rely=0.3, anchor=customtkinter.CENTER)
+root = tk.Tk()
+root.title("FitnessBuddy!")
+canvas = tk.Canvas(root, width=270, height=284)
+canvas.pack()
 
-connection_button = customtkinter.CTkButton(master=app, text="Connect", command=connect)
-connection_button.place(relx=0.5, rely=0.5, anchor=customtkinter.CENTER)
-disconnect_button = customtkinter.CTkButton(master=app, text="Disconnect", command=disconnect)
-disconnect_button.place(relx=0.5, rely=0.7, anchor=customtkinter.CENTER)
+# create a circle on the canvas
+image = tk.PhotoImage(file="image.png")
+image_width, image_height = image.width(), image.height()
+image_id = canvas.create_image(image_width // 2, image_height // 2, image=image)
+x, y, size = 20, image_height - 65, 30
+circle = canvas.create_oval(x, y, x + size, y + size, fill="red")
 
-app.mainloop()
+
+move_button = tk.Button(root, text="Calibrate", command=calibrate)
+move_button.pack()
+
+color_button = tk.Button(root, text="Start", command=connect)
+color_button.pack()
+
+clear_button = tk.Button(root, text="Stop", command=disconnect)
+clear_button.pack()
+
+
+def move_image():
+    global is_started, calibration
+    if is_started and not calibration:
+        if canvas.coords(image_id)[0] <= -image_width // 2 + 280:
+            print("Done!")
+            is_started = False
+        canvas.move(image_id, -5, 0)
+    canvas.after(35, move_image)
+
+
+canvas.after(50, move_image)
+
+# start the main loop
+root.mainloop()
